@@ -23,6 +23,7 @@ import {
   txnLink,
 } from "./utils";
 import * as fs from "fs";
+import { logDebug, logError, logInfo } from "./logger";
 
 interface WalletTrack {
   address: string;
@@ -50,20 +51,7 @@ export class WalletTracker {
   }
 
   public saveLog(message: string): void {
-    const logFile = LOGFILE;
-    const maxSize = LOG_MAX_SIZE;
-    // Check current file size
-    if (fs.existsSync(logFile)) {
-      const stats = fs.statSync(logFile);
-      if (stats.size >= maxSize) {
-        return; // Skip logging if file is too large
-      }
-    }
-
-    // const timestamp = new Date().toISOString();
-    // const logMessage = `[${timestamp}] ${message}\n`;
-    const logMessage = `${message}\n`;
-    fs.appendFileSync(logFile, logMessage);
+    logInfo(message);
   }
 
   private async trackNewWallet(
@@ -173,7 +161,7 @@ export class WalletTracker {
         disable_web_page_preview: true,
       });
     } catch (error) {
-      console.error("Error sending Telegram notification:", error);
+      logError("Error sending Telegram notification:", error);
     }
   }
 
@@ -192,7 +180,7 @@ export class WalletTracker {
               this.connection,
               signature
             );
-            console.log(`${id} Data:`, data?.signature);
+            logDebug(`${id} Data:`, { signature: data?.signature });
             let smWallets = [];
 
             if (data?.balanceChange && data.sender === MAIN_WALLET_ADDRESS) {
@@ -244,13 +232,13 @@ export class WalletTracker {
               );
             }
           } catch (error) {
-            console.log(`Error processing ${id} transactions:`, error);
+            logError(`Error processing ${id} transactions:`, error);
           }
         },
         "confirmed"
       );
     } catch (error) {
-      console.log(`Error monitoring ${id} transactions:`, error);
+      logError(`Error monitoring ${id} transactions:`, error);
       this.saveLog(`Error monitoring ${id} transactions`);
     }
   }
@@ -259,6 +247,6 @@ export class WalletTracker {
     await this.monitorTransactions(1);
     await this.monitorTransactions(2);
     this.saveLog("Wallet tracker started...");
-    console.log("Wallet tracker started...");
+    logInfo("Wallet tracker started...");
   }
 }

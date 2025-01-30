@@ -28,13 +28,13 @@ https://drive.google.com/file/d/1M9n0K-FtxMMSh0bxTx-VMSwQGG8TrzrA/view?usp=drive
 1. clone the repository:
 
 ```
-https://github.com/rizzolib/Solana-Telegram-Wallet-for-Wallet-Tracking.git
+https://github.com/rizzolib/Solana-Telegram-Bot.git
 ```
 
 2. Go to the project directory:
 
 ```
-cd Solana-Telegram-Wallet-for-Wallet-Tracking
+cd Solana-Telegram-Bot
 ```
 
 3. Install the required packages:

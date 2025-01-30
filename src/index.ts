@@ -1,21 +1,21 @@
 import { WalletTracker } from "./utils";
+import { logError, logInfo } from "./utils/logger";
 
-import { clearDB, clearLogs } from "./utils/utils";
+const tracker = new WalletTracker();
+
 async function main() {
-  const tracker = new WalletTracker();
   try {
-    // clearDB();
-    clearLogs();
     await tracker.start();
   } catch (error) {
+    logError("Error starting wallet tracker:", error);
     tracker.saveLog(`Error starting wallet tracker: ${error} `);
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    main();
   }
 }
 
 main().catch((error) => {
-  console.error("Main process error:", error);
-  console.log("Restarting in 3 seconds...");
-  setTimeout(main, 3000);
+  logError("Main process error:", error);
+  logInfo("Restarting in 3 seconds...");
+  setTimeout(() => {
+    main();
+  }, 3000);
 });
