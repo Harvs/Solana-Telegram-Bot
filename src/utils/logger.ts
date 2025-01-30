@@ -54,8 +54,12 @@ export const logInfo = (message: string, meta?: any) => {
     logger.info(message, meta);
 };
 
-export const logError = (message: string, error?: any) => {
-    logger.error(message, { error: error?.message || error });
+export const logError = (message: string, error?: Error | unknown) => {
+    if (error instanceof Error) {
+        logger.error(message, { error: error.message, stack: error.stack });
+    } else {
+        logger.error(message, { error });
+    }
 };
 
 // Create logs directory if it doesn't exist

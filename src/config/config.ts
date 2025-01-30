@@ -7,8 +7,17 @@ export const MAIN_WALLET_ADDRESS_1 = process.env.MAIN_WALLET_ADDRESS_1 || "";
 export const MAIN_WALLET_ADDRESS_2 = process.env.MAIN_WALLET_ADDRESS_2 || "";
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 export const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || "";
-export const SOLANA_ALCHEMY_API_KEY = process.env.SOLANA_ALCHEMY_API_KEY || "";
-export const SOLANA_RPC_URL = `${process.env.SOLANA_RPC_URL}${SOLANA_ALCHEMY_API_KEY}` || "";
+export const SOLANA_RPC_API_KEY = process.env.SOLANA_RPC_API_KEY || "";
+
+// Construct RPC URL with API key
+export const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL
+  ? process.env.SOLANA_RPC_URL.replace("api-key/", "") + "api-key/" + SOLANA_RPC_API_KEY
+  : "";
+
+// Construct WebSocket URL with API key
+export const SOLANA_WEBSOCKET_URL = process.env.SOLANA_WEBSOCKET_URL
+  ? process.env.SOLANA_WEBSOCKET_URL.replace("api-key/", "") + "api-key/" + SOLANA_RPC_API_KEY
+  : "";
 
 export const TRACKED_WALLETS_SIZE = 1000;
 
