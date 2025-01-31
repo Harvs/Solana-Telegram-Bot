@@ -1,7 +1,7 @@
 import { Connection, PublicKey, Context as SolanaContext } from "@solana/web3.js";
 import { Database } from "sqlite3";
 import TelegramBot from "node-telegram-bot-api";
-import fs from 'fs';
+import * as fs from "fs";
 import path from 'path';
 import {
   DB_PATH,
@@ -23,11 +23,17 @@ import {
   getSignature2CA,
   getTokenInfo,
   getTransactionDetails,
-  shortenAddressWithLink,
-  txnLink,
 } from "./utils";
-import * as fs from "fs";
 import { logDebug, logError, logInfo } from "./logger";
+
+function shortenAddressWithLink(address: string, type: 'SOL' | 'SPL'): string {
+  const baseUrl = type === 'SOL' ? 'https://solscan.io/account/' : 'https://solscan.io/token/';
+  return `<a href="${baseUrl}${address}" class="tg-spoiler">${address}</a>`;
+}
+
+function txnLink(signature: string): string {
+  return `<a href="https://solscan.io/tx/${signature}" class="tg-spoiler">TX</a>`;
+}
 
 interface WalletTrack {
   address: string;
@@ -49,6 +55,8 @@ export class WalletTracker {
   private isTracking: boolean;
   private stateFile: string;
   private subscriptions: { [key: number]: any };
+  private tokenNames: Map<string, string> = new Map();
+  private tokenListLoaded: boolean = false;
 
   constructor() {
     logInfo("Initializing WalletTracker...");
@@ -104,9 +112,9 @@ export class WalletTracker {
           this.isTracking = true;
           await this.saveState();
           await this.startTracking();
-          this.bot.sendMessage(msg.chat.id, '🚀 Wallet tracking started!\n\nMonitoring for transactions...');
+          this.bot.sendMessage(msg.chat.id, '🚀 Wallet tracking started!\n\nMonitoring for transactions...', { parse_mode: 'HTML', disable_web_page_preview: true });
         } else {
-          this.bot.sendMessage(msg.chat.id, '⚠️ Tracking is already active');
+          this.bot.sendMessage(msg.chat.id, '⚠️ Tracking is already active', { parse_mode: 'HTML', disable_web_page_preview: true });
         }
       });
 
@@ -115,9 +123,9 @@ export class WalletTracker {
           this.isTracking = false;
           await this.saveState();
           await this.stopTracking();
-          this.bot.sendMessage(msg.chat.id, '⏹ Wallet tracking stopped');
+          this.bot.sendMessage(msg.chat.id, '⏹ Wallet tracking stopped', { parse_mode: 'HTML', disable_web_page_preview: true });
         } else {
-          this.bot.sendMessage(msg.chat.id, '⚠️ Tracking is already stopped');
+          this.bot.sendMessage(msg.chat.id, '⚠️ Tracking is already stopped', { parse_mode: 'HTML', disable_web_page_preview: true });
         }
       });
 
@@ -126,11 +134,11 @@ export class WalletTracker {
           `State: ${this.isTracking ? '🟢 Active' : '🔴 Stopped'}\n` +
           `Wallet 1: ${this.trackedWallets_1.size} addresses\n` +
           `Wallet 2: ${this.trackedWallets_2.size} addresses`;
-        this.bot.sendMessage(msg.chat.id, status);
+        this.bot.sendMessage(msg.chat.id, status, { parse_mode: 'HTML', disable_web_page_preview: true });
       });
 
       this.bot.onText(/\/help/, (msg) => {
-        this.bot.sendMessage(msg.chat.id, 'Available commands:\n/start - Start tracking\n/stop - Stop tracking\n/status - Show status\n/help - Show this help message');
+        this.bot.sendMessage(msg.chat.id, 'Available commands:\n/start - Start tracking\n/stop - Stop tracking\n/status - Show status\n/help - Show this help message', { parse_mode: 'HTML', disable_web_page_preview: true });
       });
 
       // Send initialization message
@@ -141,11 +149,12 @@ export class WalletTracker {
         '/start - Start tracking\n' +
         '/stop - Stop tracking\n' +
         '/status - Show status\n' +
-        '/help - Show this help message'
+        '/help - Show this help message',
+        { parse_mode: 'HTML', disable_web_page_preview: true }
       )
         .then(() => logInfo("Successfully connected to Telegram"))
         .catch((error: Error) => {
-          logError("Failed to send Telegram message", error);
+          logError("Error sending Telegram message", error);
           throw error;
         });
 
@@ -203,6 +212,20 @@ export class WalletTracker {
 
   private async startTracking(): Promise<void> {
     if (this.isTracking) {
+      // Initialize main wallets
+      this.trackedWallets_1.set(MAIN_WALLET_ADDRESS_1, {
+        address: MAIN_WALLET_ADDRESS_1,
+        timestamp: Date.now()
+      });
+      this.trackedWallets_2.set(MAIN_WALLET_ADDRESS_2, {
+        address: MAIN_WALLET_ADDRESS_2,
+        timestamp: Date.now()
+      });
+      
+      logInfo(`Initialized main wallets for tracking:
+        Wallet 1: ${MAIN_WALLET_ADDRESS_1}
+        Wallet 2: ${MAIN_WALLET_ADDRESS_2}`);
+
       await this.monitorTransactions(1);
       await this.monitorTransactions(2);
       logInfo("Wallet tracking started");
@@ -217,23 +240,45 @@ export class WalletTracker {
       }
     });
     this.subscriptions = {};
+    
+    // Clear tracked wallets
+    this.trackedWallets_1.clear();
+    this.trackedWallets_2.clear();
+    
     logInfo("Wallet tracking stopped");
-  }
-
-  public saveLog(message: string): void {
-    logInfo(message);
   }
 
   private async trackNewWallet(
     wallet_id: number,
     address: string
   ): Promise<void> {
-    const timestamp = Date.now();
-    if (wallet_id === 1)
-      this.trackedWallets_1.set(address, { address, timestamp });
-    if (wallet_id === 2)
-      this.trackedWallets_2.set(address, { address, timestamp });
+    try {
+      const walletMap = wallet_id === 1 ? this.trackedWallets_1 : this.trackedWallets_2;
+
+      if (walletMap.size >= TRACKED_WALLETS_SIZE) {
+        const oldestEntry = Array.from(walletMap.entries()).reduce((oldest, current) =>
+          current[1].timestamp < oldest[1].timestamp ? current : oldest
+        );
+
+        if (oldestEntry) {
+          walletMap.delete(oldestEntry[0]);
+          logInfo(
+            `Removed oldest wallet ${oldestEntry[0]} from wallet ${wallet_id} tracking`
+          );
+        }
+      }
+
+      walletMap.set(address, {
+        address,
+        timestamp: Date.now(),
+      });
+
+      logInfo(`Added new wallet ${address} to wallet ${wallet_id} tracking`);
+    } catch (error) {
+      logError(`Error tracking new wallet: ${error}`);
+    }
   }
+
   private async trackUpdateWallet(
     wallet_id: number,
     address: string
@@ -268,7 +313,7 @@ export class WalletTracker {
           // console.log("CA:", CA);
 
           if (CA) {
-            this.saveLog(
+            logInfo(
               `small wallet tx: sm: ${newTrackedWalletAddress}, token: ${CA}, siggnature: ${signature}`
             );
             const CA_ADDRESS = CA.toString();
@@ -293,7 +338,7 @@ export class WalletTracker {
                 CA_ADDRESS,
                 signature
               );
-              this.saveLog(
+              logInfo(
                 `TG alert: 📝 ${id} Main wall: sm:${newTrackedWalletAddress} => ca:${CA_ADDRESS}, tx: ${signature}`
               );
               this.pumpfunTokens.set(CA_ADDRESS, 3);
@@ -302,7 +347,7 @@ export class WalletTracker {
             }
           }
         } catch (error) {
-          this.saveLog(`Error: ${error}`);
+          logError(`Error: ${error}`);
         }
       }
     );
@@ -317,117 +362,211 @@ export class WalletTracker {
   ): Promise<void> {
     const message = `🔗 ${shortenAddressWithLink(
       ca,
-      symbol
+      'SPL' // Since this is for tokens/contracts, we'll use SPL type
     )} | <code>MC: $${mc}</code> | ${birdeyeLink(ca)} | ${dextoolLink(
       ca
     )} | ${txnLink(signature)}
-      <code>${ca}</code>
-      `;
-    // console.log(message);
+      <code>${ca}</code>`;
+
+    const options = {
+      parse_mode: "HTML" as const,
+      disable_web_page_preview: true
+    };
 
     try {
-      await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message, {
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      });
+      await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message.trim(), options);
     } catch (error) {
       logError("Error sending Telegram notification:", error);
     }
   }
 
-  public async monitorTransactions(id: number): Promise<void> {
-    const MAIN_WALLET_ADDRESS = id === 1 ? MAIN_WALLET_ADDRESS_1 : MAIN_WALLET_ADDRESS_2;
-    logInfo(`Starting transaction monitoring for wallet ${id}`, { address: MAIN_WALLET_ADDRESS });
+  private async loadTokenList() {
+    if (this.tokenListLoaded) return;
+    
+    try {
+      // Load from Solana Token List
+      const response = await fetch('https://raw.githubusercontent.com/solana-labs/token-list/main/src/tokens/solana.tokenlist.json');
+      const tokenList = await response.json();
+      
+      for (const token of tokenList.tokens) {
+        // Store token metadata directly
+        this.tokenNames.set(token.address, token.symbol);
+      }
+      
+      this.tokenListLoaded = true;
+      logInfo("Token list loaded successfully");
+    } catch (error) {
+      logError(`Error loading token list: ${error}`);
+      // Reset the flag if loading failed
+      this.tokenListLoaded = false;
+    }
+  }
+
+  private async getTokenMetadata(mint: string): Promise<string> {
+    // Ensure token list is loaded before proceeding
+    await this.loadTokenList();
+    
+    // Return cached token name if available
+    if (this.tokenNames.has(mint)) {
+      return this.tokenNames.get(mint)!;
+    }
 
     try {
-      this.connection.onLogs(
-        new PublicKey(MAIN_WALLET_ADDRESS),
-        async (logs, ctx: SolanaContext) => {
+      // Try to get Metaplex metadata
+      const connection = new Connection(SOLANA_RPC_URL);
+      const metaplexProgramId = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+      const [metadataAddress] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from('metadata'),
+          metaplexProgramId.toBuffer(),
+          new PublicKey(mint).toBuffer(),
+        ],
+        metaplexProgramId
+      );
+
+      const accountInfo = await connection.getAccountInfo(metadataAddress);
+      if (accountInfo) {
+        // Decode Metaplex metadata
+        const metadata = this.decodeMetadata(accountInfo.data);
+        const symbol = metadata.data.symbol;
+        if (symbol) {
+          this.tokenNames.set(mint, symbol);
+          return symbol;
+        }
+      }
+
+      // Fallback to token account data
+      const info = await connection.getParsedAccountInfo(new PublicKey(mint));
+      if (info.value?.data && 'parsed' in info.value.data) {
+        const metadata = info.value.data.parsed;
+        if ('info' in metadata && 'symbol' in metadata.info) {
+          const symbol = metadata.info.symbol;
+          this.tokenNames.set(mint, symbol);
+          return symbol;
+        }
+      }
+    } catch (error) {
+      logError(`Error fetching token name for ${mint}: ${error}`);
+    }
+
+    return mint.slice(0, 4) + '...' + mint.slice(-4); // Fallback to shortened address
+  }
+
+  // Metaplex metadata decoder
+  private decodeMetadata(buffer: Buffer): { data: { name: string; symbol: string } } {
+    // Skip the first byte (version)
+    let offset = 1;
+    
+    // Read name length and name
+    const nameLength = buffer.readUInt32LE(offset);
+    offset += 4;
+    const name = buffer.slice(offset, offset + nameLength).toString();
+    offset += nameLength;
+    
+    // Read symbol length and symbol
+    const symbolLength = buffer.readUInt32LE(offset);
+    offset += 4;
+    const symbol = buffer.slice(offset, offset + symbolLength).toString();
+    
+    return {
+      data: {
+        name,
+        symbol,
+      }
+    };
+  }
+
+  private async monitorTransactions(id: number): Promise<void> {
+    try {
+      // Remove existing subscription if any
+      if (this.subscriptions[id]) {
+        this.subscriptions[id].remove();
+        delete this.subscriptions[id];
+      }
+
+      const mainWalletAddress = id === 1 ? MAIN_WALLET_ADDRESS_1 : MAIN_WALLET_ADDRESS_2;
+      const walletMap = id === 1 ? this.trackedWallets_1 : this.trackedWallets_2;
+      const publicKey = new PublicKey(mainWalletAddress);
+
+      // Monitor all transactions including SPL tokens
+      this.subscriptions[id] = this.connection.onLogs(
+        publicKey,
+        async (logs, context) => {
           try {
-            logDebug(`Received logs for wallet ${id}`, { 
-              signature: logs.signature,
-              slot: ctx.slot,
-              logCount: logs.logs.length 
+            if (!logs.signature) return;
+
+            const tx = await this.connection.getTransaction(logs.signature, {
+              maxSupportedTransactionVersion: 0,
             });
 
-            const data = await getTransactionDetails(
-              this.connection,
-              logs.signature
-            );
-            
-            if (data?.balanceChange && data.sender === MAIN_WALLET_ADDRESS) {
-              logDebug(`Processing transaction for wallet ${id}`, {
-                signature: logs.signature,
-                balanceChange: data.balanceChange,
-                sender: data.sender
-              });
-              let smWallets = [];
+            if (!tx) return;
 
-              if (data?.balanceChange && data.sender === MAIN_WALLET_ADDRESS) {
-                const balanceValue = parseFloat(
-                  data.balanceChange.replace(" SOL", "")
-                );
-                if (Math.abs(balanceValue) < MAX_BALANCE_CHANGE) {
-                  for (const instruction of data?.instructions) {
-                    const newTrackedWalletAddress = instruction.receiver;
+            const timestamp = tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleString() : 'Unknown';
+            const slot = tx.slot;
 
-                    if (
-                      instruction.program === "system" &&
-                      instruction.type === "transfer" &&
-                      newTrackedWalletAddress
-                    ) {
-                      smWallets.push(newTrackedWalletAddress);
-                      const tmpTrackedWallets =
-                        id === 1 ? this.trackedWallets_1 : this.trackedWallets_2;
-                      if (tmpTrackedWallets.has(newTrackedWalletAddress)) {
-                        await this.trackUpdateWallet(id, newTrackedWalletAddress);
-                        continue;
-                      }
-                      if (tmpTrackedWallets.size >= TRACKED_WALLETS_SIZE) {
-                        this.saveLog(
-                          `Main wallet ${id} tracked limited wallets. Skipping...`
-                        );
-                        continue;
-                      }
-                      await this.trackNewWallet(id, newTrackedWalletAddress);
-                      try {
-                        await this.MonitorSmallWallets(
-                          id,
-                          newTrackedWalletAddress
-                        );
-                      } catch (error) {
-                        this.saveLog(
-                          `Error monitoring ${id} transactions: ${error}`
-                        );
-                      }
-                    }
-                  }
+            // Track token balance changes
+            let balanceChanges = '';
+            const preBalances = new Map<string, number>();
+            const postBalances = new Map<string, number>();
+
+            // Get pre-balances
+            if (tx.meta?.preTokenBalances) {
+              for (const balance of tx.meta.preTokenBalances) {
+                if (balance.owner === mainWalletAddress) {
+                  preBalances.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
                 }
               }
-              if (smWallets.length > 0) {
-                this.saveLog(
-                  `${id} Main wallet txn: ${
-                    data?.signature
-                  } smWallets: ${smWallets.join(", ")}`
-                );
+            }
+
+            // Get post-balances
+            if (tx.meta?.postTokenBalances) {
+              for (const balance of tx.meta.postTokenBalances) {
+                if (balance.owner === mainWalletAddress) {
+                  postBalances.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
+                }
               }
             }
+
+            // Calculate changes
+            for (const [mint, postAmount] of postBalances) {
+              const preAmount = preBalances.get(mint) || 0;
+              if (postAmount !== preAmount) {
+                const change = postAmount - preAmount;
+                const tokenName = await this.getTokenMetadata(mint);
+                balanceChanges += `\n${change > 0 ? '📈' : '📉'} ${tokenName}: ${change.toFixed(4)} (New Balance: ${postAmount.toFixed(4)})`;
+              }
+            }
+
+            // Only send message if there are token balance changes
+            if (balanceChanges) {
+              const message = `💰 Wallet ${id} Balance Update:
+Address: ${shortenAddressWithLink(mainWalletAddress, 'SOL')}
+Changes:${balanceChanges}
+Time: ${timestamp}
+${txnLink(logs.signature)}`;
+
+              logInfo(message);
+              await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message, { 
+                parse_mode: 'HTML',
+                disable_web_page_preview: true 
+              });
+            }
           } catch (error) {
-            logError(`Error processing ${id} transactions:`, error);
+            logError(`Error processing transaction: ${error}`);
           }
         },
-        "confirmed"
+        'confirmed'
       );
+
+      logInfo(`Started monitoring transactions for wallet ${id} (${mainWalletAddress})`);
     } catch (error) {
-      logError(`Error monitoring ${id} transactions:`, error);
-      this.saveLog(`Error monitoring ${id} transactions`);
+      logError(`Error setting up transaction monitoring for wallet ${id}: ${error}`);
     }
   }
 
   public async start(): Promise<void> {
+    logInfo("Wallet tracker starting...");
     await this.monitorTransactions(1);
     await this.monitorTransactions(2);
-    this.saveLog("Wallet tracker started...");
-    logInfo("Wallet tracker started...");
   }
 }

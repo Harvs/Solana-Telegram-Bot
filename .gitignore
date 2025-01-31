@@ -35,3 +35,4 @@ wallets.db-journal
 
 wallet_tracker.txt
 test.ts
+data/bot_state.json
