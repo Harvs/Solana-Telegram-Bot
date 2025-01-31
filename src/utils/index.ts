@@ -25,6 +25,7 @@ import {
   getTransactionDetails,
 } from "./utils";
 import { logDebug, logError, logInfo } from "./logger";
+import { AccountLayout } from '@solana/spl-token';
 
 function shortenAddressWithLink(address: string, type: 'SOL' | 'SPL'): string {
   const baseUrl = type === 'SOL' ? 'https://solscan.io/account/' : 'https://solscan.io/token/';
@@ -487,80 +488,81 @@ export class WalletTracker {
       const mainWalletAddress = id === 1 ? MAIN_WALLET_ADDRESS_1 : MAIN_WALLET_ADDRESS_2;
       const walletMap = id === 1 ? this.trackedWallets_1 : this.trackedWallets_2;
       const publicKey = new PublicKey(mainWalletAddress);
+      const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 
-      // Monitor all transactions including SPL tokens
-      this.subscriptions[id] = this.connection.onLogs(
-        publicKey,
-        async (logs, context) => {
+      logInfo(`Setting up token account monitoring for wallet ${id} (${mainWalletAddress})`);
+
+      // Monitor token account changes
+      this.subscriptions[id] = this.connection.onProgramAccountChange(
+        TOKEN_PROGRAM_ID,
+        async (accountInfo, context) => {
           try {
-            if (!logs.signature) return;
-
-            const tx = await this.connection.getTransaction(logs.signature, {
-              maxSupportedTransactionVersion: 0,
-            });
-
-            if (!tx) return;
-
-            const timestamp = tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleString() : 'Unknown';
-            const slot = tx.slot;
-
-            // Track token balance changes
-            let balanceChanges = '';
-            const preBalances = new Map<string, number>();
-            const postBalances = new Map<string, number>();
-
-            // Get pre-balances
-            if (tx.meta?.preTokenBalances) {
-              for (const balance of tx.meta.preTokenBalances) {
-                if (balance.owner === mainWalletAddress) {
-                  preBalances.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
-                }
-              }
-            }
-
-            // Get post-balances
-            if (tx.meta?.postTokenBalances) {
-              for (const balance of tx.meta.postTokenBalances) {
-                if (balance.owner === mainWalletAddress) {
-                  postBalances.set(balance.mint, balance.uiTokenAmount.uiAmount || 0);
-                }
-              }
-            }
-
-            // Calculate changes
-            for (const [mint, postAmount] of postBalances) {
-              const preAmount = preBalances.get(mint) || 0;
-              if (postAmount !== preAmount) {
-                const change = postAmount - preAmount;
-                const tokenName = await this.getTokenMetadata(mint);
-                balanceChanges += `\n${change > 0 ? '📈' : '📉'} ${tokenName}: ${change.toFixed(4)} (New Balance: ${postAmount.toFixed(4)})`;
-              }
-            }
-
-            // Only send message if there are token balance changes
-            if (balanceChanges) {
-              const message = `💰 Wallet ${id} Balance Update:
+            // Check if this token account belongs to our wallet
+            const tokenAccountInfo = AccountLayout.decode(accountInfo.accountInfo.data);
+            const owner = new PublicKey(tokenAccountInfo.owner);
+            
+            if (owner.toString() === mainWalletAddress) {
+              logInfo(`Token account change detected for wallet ${mainWalletAddress}`);
+              
+              // Get the mint address
+              const mint = new PublicKey(tokenAccountInfo.mint);
+              const tokenName = await this.getTokenMetadata(mint.toString());
+              
+              // Get token account data including decimals
+              const tokenMintInfo = await this.connection.getParsedAccountInfo(mint);
+              const decimals = (tokenMintInfo.value?.data as any)?.parsed?.info?.decimals || 9;
+              const amount = Number(tokenAccountInfo.amount) / Math.pow(10, decimals);
+              
+              // Get the transaction signature from the context
+              const signature = context.slot ? await this.getRecentSignatureForAddress(publicKey, context.slot) : null;
+              
+              const message = `💰 Wallet ${id} Token Update:
 Address: ${shortenAddressWithLink(mainWalletAddress, 'SOL')}
-Changes:${balanceChanges}
-Time: ${timestamp}
-${txnLink(logs.signature)}`;
+Token: ${tokenName}
+New Balance: ${amount.toFixed(4)}
+Time: ${new Date().toLocaleString()}
+${signature ? txnLink(signature) : ''}`;
 
               logInfo(message);
-              await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message, { 
+              await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message, {
                 parse_mode: 'HTML',
-                disable_web_page_preview: true 
+                disable_web_page_preview: true
               });
             }
           } catch (error) {
-            logError(`Error processing transaction: ${error}`);
+            logError(`Error processing token account change: ${error}`);
           }
         },
-        'confirmed'
+        'confirmed',
+        [
+          {
+            memcmp: {
+              offset: 32, // Owner offset in token account data
+              bytes: mainWalletAddress
+            }
+          }
+        ]
       );
 
-      logInfo(`Started monitoring transactions for wallet ${id} (${mainWalletAddress})`);
+      logInfo(`Started monitoring token accounts for wallet ${id} (${mainWalletAddress})`);
     } catch (error) {
       logError(`Error setting up transaction monitoring for wallet ${id}: ${error}`);
+    }
+  }
+
+  private async getRecentSignatureForAddress(address: PublicKey, slot: number): Promise<string | null> {
+    try {
+      const signatures = await this.connection.getSignaturesForAddress(address, {
+        limit: 1
+      });
+      
+      if (signatures.length > 0) {
+        return signatures[0].signature;
+      }
+      return null;
+    } catch (error) {
+      logError(`Error getting recent signature: ${error}`);
+      return null;
     }
   }
 
