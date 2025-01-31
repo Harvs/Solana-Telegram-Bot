@@ -49,47 +49,79 @@ export async function getTransactionDetails(
   }
 }
 
-export async function getSignature2CA(connection: any, signature: string) {
-  const txn = await connection.getParsedTransaction(signature, {
-    maxSupportedTransactionVersion: 0,
-  });
-  //@ts-ignore
-  const ca = txn?.transaction.message.instructions.find(
-    (ix: any) => ix.programId.toString() === PUMP_FUN_ADDRESS
-  )?.accounts as PublicKey[];
-  if (ca && ca[2]) return ca[2];
-  return undefined;
+export async function getSignature2CA(connection: any, signature: string): Promise<string | null> {
+  try {
+    const tx = await connection.getParsedTransaction(signature, {
+      maxSupportedTransactionVersion: 0,
+      commitment: "confirmed",
+    });
+
+    if (!tx?.meta?.innerInstructions?.[0]?.instructions) {
+      return null;
+    }
+
+    for (const ix of tx.meta.innerInstructions[0].instructions) {
+      if (ix.parsed?.type === 'mintTo' || ix.parsed?.type === 'transferChecked') {
+        return ix.parsed.info.mint;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error getting CA from signature:', error);
+    return null;
+  }
 }
 
 export async function getTokenInfo(connection: any, ca: string) {
-  let symbol = "Unknown";
-  let mc = "";
   try {
     const metaplex = new Metaplex(connection);
-    const mintAddress = new PublicKey(ca);
-    const metadata = await metaplex.nfts().findByMint({ mintAddress });
-
-    symbol = metadata.symbol;
-    const decimal = metadata.mint.decimals;
-    const supply = Number(metadata.mint.supply.basisPoints) / 10 ** decimal;
+    const mintPublicKey = new PublicKey(ca);
+    const nft = await metaplex.nfts().findByMint({ mintAddress: mintPublicKey });
+    
+    // Get token supply and decimals
+    const decimal = nft.mint?.decimals || 9;
+    const supply = nft.mint?.supply ? Number(nft.mint.supply.basisPoints) / Math.pow(10, decimal) : 0;
+    
+    // Get token price and calculate market cap
     const price = await getTokenPrice(ca);
-    mc = changeStyle(supply * price);
+    const mc = changeStyle(supply * price);
 
-  } catch (e) {
-    console.log(e);
-  } finally {
+    // For pump.fun tokens, we want to use the actual token name
+    let name = nft.name || 'Unknown';
+    let symbol = nft.symbol || 'Unknown';
+
+    // Clean up the name by removing null bytes and trimming
+    name = name.replace(/\0/g, '').trim();
+    symbol = symbol.replace(/\0/g, '').trim();
+
+    // If it's a pump.fun token, use the name as the symbol
+    if (ca.toLowerCase().endsWith('pump')) {
+      symbol = name;
+    }
+
     return {
+      name,
       symbol,
-      mc
+      decimals: decimal,
+      mc: mc || '0',
+      supply: supply,
+      isPumpToken: ca.toLowerCase().endsWith('pump')
+    };
+  } catch (error) {
+    console.error('Error getting token info:', error);
+    return {
+      name: 'Unknown',
+      symbol: 'Unknown',
+      decimals: 9,
+      mc: '0',
+      supply: 0,
+      isPumpToken: false
     };
   }
 }
 
-export const changeStyle = (input: number): string => {
-  return input.toLocaleString();
-};
-
-export const getTokenPrice = async (ca: string) => {
+export async function getTokenPrice(ca: string) {
   try {
     const BaseURL = `https://api.jup.ag/price/v2?ids=${ca}`;
 
@@ -101,6 +133,17 @@ export const getTokenPrice = async (ca: string) => {
   } catch (error) {
     return 0;
   }
+}
+
+export function changeStyle(input: number): string {
+  if (isNaN(input) || !isFinite(input)) return '0';
+  
+  const suffixes = ['', 'K', 'M', 'B', 'T'];
+  const magnitude = Math.floor(Math.log10(Math.abs(input)) / 3);
+  const scaledNumber = input / Math.pow(10, magnitude * 3);
+  const suffix = suffixes[magnitude] || '';
+  
+  return scaledNumber.toFixed(2) + suffix;
 };
 
 export const txnLink = (txn: string) => {
@@ -115,13 +158,13 @@ export const shortenAddressWithLink = (address: string, symbol:string): string =
   return `<a href="https://solscan.io/account/${address}">${symbol}</a>`;
 };
 
-export const birdeyeLink = (address: string) => {
-  return `<a href="https://birdeye.so/token/${address}?chain=solana">BE</a>`;
-};
+export function birdeyeLink(address: string): string {
+  return `<a href="https://birdeye.so/token/${address}">Birdeye</a>`;
+}
 
-export const dextoolLink = (address: string) => {
-  return `<a href="https://www.dextools.io/app/en/solana/pair-explorer/${address}">DT</a>`;
-};
+export function dextoolLink(address: string): string {
+  return `<a href="https://www.dextools.io/app/en/solana/pair-explorer/${address}">Dextools</a>`;
+}
 
 export const clearLogs = () => {
   // Clear the log file at startup

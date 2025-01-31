@@ -1,39 +1,42 @@
-import { Connection, PublicKey, Context as SolanaContext } from "@solana/web3.js";
+import {
+  Connection,
+  PublicKey,
+  Context as SolanaContext,
+} from "@solana/web3.js";
 import { Database } from "sqlite3";
 import TelegramBot from "node-telegram-bot-api";
 import * as fs from "fs";
 import path from 'path';
 import {
-  DB_PATH,
-  LOG_MAX_SIZE,
-  LOGFILE,
-  MAIN_WALLET_ADDRESS_1,
-  MAIN_WALLET_ADDRESS_2,
-  MAX_BALANCE_CHANGE,
-  SOLANA_RPC_API_KEY,
   SOLANA_RPC_URL,
   SOLANA_WEBSOCKET_URL,
+  SOLANA_RPC_API_KEY,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHANNEL_ID,
+  MAIN_WALLET_ADDRESS_1,
+  MAIN_WALLET_ADDRESS_2,
+  DB_PATH,
   TRACKED_WALLETS_SIZE,
 } from "../config/config";
 import {
+  getTransactionDetails,
   birdeyeLink,
   dextoolLink,
   getSignature2CA,
   getTokenInfo,
-  getTransactionDetails,
 } from "./utils";
 import { logDebug, logError, logInfo } from "./logger";
 import { AccountLayout } from '@solana/spl-token';
+import { Metaplex } from "@metaplex-foundation/js";
 
 function shortenAddressWithLink(address: string, type: 'SOL' | 'SPL'): string {
   const baseUrl = type === 'SOL' ? 'https://solscan.io/account/' : 'https://solscan.io/token/';
-  return `<a href="${baseUrl}${address}" class="tg-spoiler">${address}</a>`;
+  const shortened = `${address.slice(0, 4)}...${address.slice(-4)}`;
+  return `<a href="${baseUrl}${address}">${shortened}</a>`;
 }
 
 function txnLink(signature: string): string {
-  return `<a href="https://solscan.io/tx/${signature}" class="tg-spoiler">TX</a>`;
+  return `<a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
 }
 
 interface WalletTrack {
@@ -403,85 +406,144 @@ export class WalletTracker {
     }
   }
 
-  private async getTokenMetadata(mint: string): Promise<string> {
-    // Ensure token list is loaded before proceeding
-    await this.loadTokenList();
-    
-    // Return cached token name if available
-    if (this.tokenNames.has(mint)) {
-      return this.tokenNames.get(mint)!;
-    }
-
-    try {
-      // Try to get Metaplex metadata
-      const connection = new Connection(SOLANA_RPC_URL);
-      const metaplexProgramId = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
-      const [metadataAddress] = PublicKey.findProgramAddressSync(
-        [
-          Buffer.from('metadata'),
-          metaplexProgramId.toBuffer(),
-          new PublicKey(mint).toBuffer(),
-        ],
-        metaplexProgramId
-      );
-
-      const accountInfo = await connection.getAccountInfo(metadataAddress);
-      if (accountInfo) {
-        // Decode Metaplex metadata
-        const metadata = this.decodeMetadata(accountInfo.data);
-        const symbol = metadata.data.symbol;
-        if (symbol) {
-          this.tokenNames.set(mint, symbol);
-          return symbol;
-        }
-      }
-
-      // Fallback to token account data
-      const info = await connection.getParsedAccountInfo(new PublicKey(mint));
-      if (info.value?.data && 'parsed' in info.value.data) {
-        const metadata = info.value.data.parsed;
-        if ('info' in metadata && 'symbol' in metadata.info) {
-          const symbol = metadata.info.symbol;
-          this.tokenNames.set(mint, symbol);
-          return symbol;
-        }
-      }
-    } catch (error) {
-      logError(`Error fetching token name for ${mint}: ${error}`);
-    }
-
-    return mint.slice(0, 4) + '...' + mint.slice(-4); // Fallback to shortened address
+  private getPumpFunTokenId(address: string): string {
+    // Extract the token ID from the address by removing the 'pump' suffix
+    // and getting the last part after any separator
+    const withoutPump = address.slice(0, -4); // remove 'pump'
+    const parts = withoutPump.split(/[_\-./]/); // split by common separators
+    return parts[parts.length - 1] || withoutPump; // use the last part or full string if no separators
   }
 
-  // Metaplex metadata decoder
-  private decodeMetadata(buffer: Buffer): { data: { name: string; symbol: string } } {
-    // Skip the first byte (version)
-    let offset = 1;
-    
-    // Read name length and name
-    const nameLength = buffer.readUInt32LE(offset);
-    offset += 4;
-    const name = buffer.slice(offset, offset + nameLength).toString();
-    offset += nameLength;
-    
-    // Read symbol length and symbol
-    const symbolLength = buffer.readUInt32LE(offset);
-    offset += 4;
-    const symbol = buffer.slice(offset, offset + symbolLength).toString();
-    
-    return {
-      data: {
-        name,
-        symbol,
+  private async getTokenMetadata(mint: string): Promise<string> {
+    try {
+      // Check for pump.fun tokens
+      if (mint.toLowerCase().endsWith('pump')) {
+        const tokenInfo = await getTokenInfo(this.connection, mint);
+        return `🎯 PUMP ${tokenInfo.symbol}`;
       }
-    };
+
+      // Try to get from cache first
+      const cachedName = this.tokenNames.get(mint);
+      if (cachedName) {
+        return cachedName;
+      }
+
+      // Load token list if not loaded
+      if (!this.tokenListLoaded) {
+        await this.loadTokenList();
+      }
+
+      try {
+        const metaplex = new Metaplex(this.connection);
+        const mintPublicKey = new PublicKey(mint);
+        const nft = await metaplex.nfts().findByMint({ mintAddress: mintPublicKey });
+        if (nft.name) {
+          const name = nft.name.replace(/\0/g, '').trim();
+          this.tokenNames.set(mint, name);
+          return name;
+        }
+      } catch (error) {
+        // If metadata fails, try getting symbol from token mint
+        try {
+          const tokenMintInfo = await this.connection.getParsedAccountInfo(new PublicKey(mint));
+          const symbol = (tokenMintInfo.value?.data as any)?.parsed?.info?.symbol;
+          if (symbol) {
+            const name = symbol.replace(/\0/g, '').trim();
+            this.tokenNames.set(mint, name);
+            return name;
+          }
+        } catch (error) {
+          // If all else fails, return shortened address with more context
+          const shortName = `Token: ${mint.slice(0, 12)}...${mint.slice(-4)}`;
+          this.tokenNames.set(mint, shortName);
+          return shortName;
+        }
+      }
+
+      // If we get here, return a default format
+      return `Token: ${mint.slice(0, 12)}...${mint.slice(-4)}`;
+    } catch (error) {
+      logError(`Error fetching token name for ${mint}: ${error}`);
+      return `Token: ${mint.slice(0, 12)}...${mint.slice(-4)}`;
+    }
+  }
+
+  private async getWalletTokenBalances(walletAddress: string): Promise<string> {
+    try {
+      const publicKey = new PublicKey(walletAddress);
+      const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+      
+      // Get all token accounts for this wallet
+      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(publicKey, {
+        programId: TOKEN_PROGRAM_ID,
+      });
+
+      let balanceText = '';
+      
+      // Sort accounts by balance value to show highest value tokens first
+      const accountsWithValue = await Promise.all(
+        tokenAccounts.value.map(async (account) => {
+          const parsedInfo = account.account.data.parsed.info;
+          const mintAddress = parsedInfo.mint;
+          const amount = parsedInfo.tokenAmount.uiAmount;
+          const tokenName = await this.getTokenMetadata(mintAddress);
+          return { tokenName, amount };
+        })
+      );
+
+      // Filter out zero balances and sort by amount
+      const nonZeroBalances = accountsWithValue
+        .filter(account => account.amount > 0)
+        .sort((a, b) => b.amount - a.amount);
+
+      // Format the balance text
+      if (nonZeroBalances.length > 0) {
+        for (const { tokenName, amount } of nonZeroBalances) {
+          balanceText += `\n${tokenName}: ${amount.toFixed(4)}`;
+        }
+      } else {
+        balanceText = '\nNo token balances found';
+      }
+
+      return balanceText;
+    } catch (error) {
+      logError(`Error getting token balances: ${error}`);
+      return '\nError fetching token balances';
+    }
+  }
+
+  private async displayCurrentBalances(): Promise<void> {
+    try {
+      // Get balances for both wallets
+      const balances1 = await this.getWalletTokenBalances(MAIN_WALLET_ADDRESS_1);
+      const balances2 = await this.getWalletTokenBalances(MAIN_WALLET_ADDRESS_2);
+
+      const message = `📊 Current Wallet Balances:\n\n` +
+        `Wallet 1 (${shortenAddressWithLink(MAIN_WALLET_ADDRESS_1, 'SOL')}):${balances1}\n\n` +
+        `Wallet 2 (${shortenAddressWithLink(MAIN_WALLET_ADDRESS_2, 'SOL')}):${balances2}`;
+
+      await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+      });
+    } catch (error) {
+      logError(`Error displaying current balances: ${error}`);
+    }
   }
 
   private async monitorTransactions(id: number): Promise<void> {
     try {
       // Remove existing subscription if any
       if (this.subscriptions[id]) {
-        this.subscriptions[id].remove();
+        try {
+          if (typeof this.subscriptions[id].remove === 'function') {
+            this.subscriptions[id].remove();
+          } else if (typeof this.subscriptions[id].unsubscribe === 'function') {
+            this.subscriptions[id].unsubscribe();
+          }
+        } catch (error) {
+          logError(`Error removing subscription for wallet ${id}: ${error}`);
+        }
         delete this.subscriptions[id];
       }
 
@@ -489,7 +551,7 @@ export class WalletTracker {
       const walletMap = id === 1 ? this.trackedWallets_1 : this.trackedWallets_2;
       const publicKey = new PublicKey(mainWalletAddress);
       const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-
+      
       logInfo(`Setting up token account monitoring for wallet ${id} (${mainWalletAddress})`);
 
       // Monitor token account changes
@@ -566,8 +628,39 @@ ${signature ? txnLink(signature) : ''}`;
     }
   }
 
+  private async handleNewTransaction(signature: string): Promise<void> {
+    try {
+      const ca = await getSignature2CA(this.connection, signature);
+      if (!ca) {
+        logDebug(`No token contract found for signature: ${signature}`);
+        return;
+      }
+
+      const tokenInfo = await getTokenInfo(this.connection, ca);
+      const symbol = tokenInfo?.symbol || 'Unknown';
+      const marketCap = tokenInfo?.mc || '0';
+
+      const message = `🔔 New Transaction Detected!\n` +
+        `Token: ${symbol}\n` +
+        `Market Cap: $${marketCap}\n` +
+        `Links: ${birdeyeLink(ca)} | ${dextoolLink(ca)} | ${txnLink(signature)}`;
+
+      await this.bot.sendMessage(TELEGRAM_CHANNEL_ID, message, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+    } catch (error) {
+      logError(`Error handling transaction: ${error}`);
+    }
+  }
+
   public async start(): Promise<void> {
     logInfo("Wallet tracker starting...");
+    
+    // Display current balances when starting
+    await this.displayCurrentBalances();
+    
+    // Start monitoring transactions
     await this.monitorTransactions(1);
     await this.monitorTransactions(2);
   }
