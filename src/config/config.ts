@@ -28,5 +28,7 @@ export const LOGFILE = "wallet_tracker.log";
 export const LOG_LEVEL = process.env.LOG_LEVEL || "INFO";
 export const LOG_MAX_SIZE = 1024 * 1024; // 1MB in bytes
 
+export const BOT_ADMIN = process.env.BOT_ADMIN ? Number(process.env.BOT_ADMIN) : null;
+
 // db
 export const DB_PATH = "wallets.db";

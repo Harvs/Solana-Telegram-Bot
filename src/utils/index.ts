@@ -17,6 +17,7 @@ import {
   MAIN_WALLET_ADDRESS_2,
   DB_PATH,
   TRACKED_WALLETS_SIZE,
+  BOT_ADMIN,
 } from "../config/config";
 import {
   getTransactionDetails,
@@ -26,7 +27,7 @@ import {
   getTokenInfo,
 } from "./utils";
 import { logDebug, logError, logInfo } from "./logger";
-import { AccountLayout } from '@solana/spl-token';
+import { AccountLayout } from '@solana/spl_token';
 import { Metaplex } from "@metaplex-foundation/js";
 
 function shortenAddressWithLink(address: string, type: 'SOL' | 'SPL'): string {
@@ -103,7 +104,8 @@ export class WalletTracker {
         { command: '/start', description: 'Start tracking wallets' },
         { command: '/stop', description: 'Stop tracking wallets' },
         { command: '/status', description: 'Show tracking status' },
-        { command: '/help', description: 'Show available commands' }
+        { command: '/help', description: 'Show available commands' },
+        { command: '/remove', description: 'Remove bot from chat' }
       ];
 
       this.bot.setMyCommands(commands)
@@ -142,7 +144,40 @@ export class WalletTracker {
       });
 
       this.bot.onText(/\/help/, (msg) => {
-        this.bot.sendMessage(msg.chat.id, 'Available commands:\n/start - Start tracking\n/stop - Stop tracking\n/status - Show status\n/help - Show this help message', { parse_mode: 'HTML', disable_web_page_preview: true });
+        this.bot.sendMessage(msg.chat.id, 'Available commands:\n/start - Start tracking\n/stop - Stop tracking\n/status - Show status\n/help - Show this help message\n/remove - Remove bot from chat', { parse_mode: 'HTML', disable_web_page_preview: true });
+      });
+
+      this.bot.onText(/\/remove/, async (msg) => {
+        try {
+          const chatId = msg.chat.id;
+          const chatType = msg.chat.type;
+          const fromId = msg.from?.id;
+
+          if (!fromId) {
+            await this.bot.sendMessage(chatId, '❌ Could not identify user.');
+            return;
+          }
+
+          // Only allow in groups and channels
+          if (chatType === 'private') {
+            await this.bot.sendMessage(chatId, '❌ This command can only be used in groups and channels.');
+            return;
+          }
+
+          // Check if user is an admin
+          const isAdmin = await this.isUserAdmin(chatId, fromId);
+          if (!isAdmin) {
+            await this.bot.sendMessage(chatId, '❌ Only administrators can remove the bot.');
+            return;
+          }
+
+          // Send goodbye message and leave the chat
+          await this.bot.sendMessage(chatId, '👋 Goodbye! The bot will now leave this chat.');
+          await this.bot.leaveChat(chatId);
+          logInfo(`Bot removed from chat ${chatId} by user ${fromId}`);
+        } catch (error) {
+          logError(`Error handling /remove command: ${error}`);
+        }
       });
 
       // Send initialization message
@@ -153,7 +188,8 @@ export class WalletTracker {
         '/start - Start tracking\n' +
         '/stop - Stop tracking\n' +
         '/status - Show status\n' +
-        '/help - Show this help message',
+        '/help - Show this help message\n' +
+        '/remove - Remove bot from chat',
         { parse_mode: 'HTML', disable_web_page_preview: true }
       )
         .then(() => logInfo("Successfully connected to Telegram"))
@@ -651,6 +687,22 @@ ${signature ? txnLink(signature) : ''}`;
       });
     } catch (error) {
       logError(`Error handling transaction: ${error}`);
+    }
+  }
+
+  private async isUserAdmin(chatId: number, userId: number): Promise<boolean> {
+    try {
+      // Check if user is the BOT_ADMIN
+      if (BOT_ADMIN && userId === BOT_ADMIN) {
+        return true;
+      }
+
+      // Otherwise check if they're a group admin
+      const chatAdmins = await this.bot.getChatAdministrators(chatId);
+      return chatAdmins.some(admin => admin.user.id === userId);
+    } catch (error) {
+      logError(`Error checking admin status: ${error}`);
+      return false;
     }
   }
 
