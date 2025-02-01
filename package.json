@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@metaplex-foundation/js": "^0.20.1",
-    "@solana/spl-token": "^0.3.11",
+    "@solana/spl-token": "^0.4.0",
     "@solana/web3.js": "^1.95.8",
     "base58": "^2.0.1",
     "bigint-buffer": "^1.1.5",
